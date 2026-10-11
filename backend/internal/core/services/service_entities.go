@@ -482,8 +482,13 @@ func (svc *EntityService) CsvImport(ctx context.Context, gid uuid.UUID, data io.
 // csvImportRowLocation resolves the leaf location for a CSV import row, creating
 // any missing locations in the row's location path as it goes. locationMap acts
 // as a cache of already-known location paths and is updated in place with any
-// locations that are created. It returns the ID of the row's leaf location.
+// locations that are created. It returns the ID of the row's leaf location, or
+// uuid.Nil when the row has no location (a top-level entity).
 func (svc *EntityService) csvImportRowLocation(ctx context.Context, gid uuid.UUID, row reporting.ExportCSVRow, locationMap map[string]uuid.UUID) (uuid.UUID, error) {
+	if len(row.Location) == 0 {
+		return uuid.Nil, nil
+	}
+
 	path := serializeLocation(row.Location)
 
 	locationID, ok := locationMap[path]

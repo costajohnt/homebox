@@ -278,12 +278,9 @@ func TestCSVExportImportPreservesItemParent(t *testing.T) {
 	assert.Equal(t, "parent-ref", childRow[parentRefCol])
 	assert.Equal(t, defaultLocationGarage, childRow[locationCol])
 
-	importRows := [][]string{header}
-	for _, row := range rows[1:] {
-		if row[nameCol] != defaultLocationGarage {
-			importRows = append(importRows, row)
-		}
-	}
+	// Re-import every exported row unchanged, including the top-level
+	// location row whose HB.location is empty (#1776).
+	importRows := rows
 
 	var csvBuf bytes.Buffer
 	writer := csv.NewWriter(&csvBuf)
