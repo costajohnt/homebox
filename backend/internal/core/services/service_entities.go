@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
+	"slices"
 	"strings"
 
 	"github.com/google/uuid"
@@ -288,6 +290,24 @@ func (svc *EntityService) CsvImport(ctx context.Context, gid uuid.UUID, data io.
 			))
 		ctx := rowCtx
 
+		// An exported location row is the location itself, not an item that
+		// lives in it: make sure a location exists at its full path (reusing
+		// any already in the group or created by an earlier row) and move on.
+		if isCSVLocationURL(row.URL) {
+			locRow := row
+			locRow.Location = slices.Concat(row.Location, reporting.LocationString{row.Name})
+			if _, err := svc.csvImportRowLocation(rowCtx, gid, locRow, locationMap); err != nil {
+				recordServiceSpanError(rowSpan, err)
+				rowSpan.End()
+				recordServiceSpanError(importSpan, err)
+				recordServiceSpanError(span, err)
+				return 0, err
+			}
+			finished++
+			rowSpan.End()
+			continue
+		}
+
 		createRequired := true
 
 		if row.ImportRef != "" {
@@ -537,6 +557,24 @@ func (svc *EntityService) csvImportRowLocation(ctx context.Context, gid uuid.UUI
 	}
 
 	return locationID, nil
+}
+
+// isCSVLocationURL reports whether an exported HB.url points at a location
+// (".../location/<uuid>") rather than an item. The export writes no entity
+// type column, so this path is the only marker of a location row. Only the
+// last two path segments are checked, so the host and any base path are
+// irrelevant.
+func isCSVLocationURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	segs := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(segs) < 2 || segs[len(segs)-2] != "location" {
+		return false
+	}
+	_, err = uuid.Parse(segs[len(segs)-1])
+	return err == nil
 }
 
 func (svc *EntityService) patchCSVParentRefs(ctx context.Context, gid uuid.UUID, rows []reporting.ExportCSVRow) error {

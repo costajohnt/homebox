@@ -300,6 +300,107 @@ func TestCSVExportImportPreservesItemParent(t *testing.T) {
 	assert.Equal(t, "Toolbox", importedChild.Parent.Name)
 }
 
+// TestCSVImportLocationRowsStayLocations re-imports a full CSV export and
+// checks that exported location rows (identified by their /location/<id>
+// HB.url) become locations, not items, and are not duplicated (#1776).
+func TestCSVImportLocationRowsStayLocations(t *testing.T) {
+	ctx := context.Background()
+
+	src, err := tRepos.Groups.GroupCreate(ctx, "csv-loc-src-"+fk.Str(4), uuid.Nil)
+	require.NoError(t, err)
+	srcLocType, err := tRepos.EntityTypes.GetDefault(ctx, src.ID, true)
+	require.NoError(t, err)
+	srcItemType, err := tRepos.EntityTypes.GetDefault(ctx, src.ID, false)
+	require.NoError(t, err)
+
+	create := func(name string, parent uuid.UUID, typ uuid.UUID) uuid.UUID {
+		t.Helper()
+		e, err := tRepos.Entities.Create(ctx, src.ID, repo.EntityCreate{Name: name, ParentID: parent, EntityTypeID: typ})
+		require.NoError(t, err)
+		return e.ID
+	}
+	garage := create(defaultLocationGarage, uuid.Nil, srcLocType.ID)
+	shelf := create("Shelf", garage, srcLocType.ID)
+	create("Attic", uuid.Nil, srcLocType.ID)
+	create("Toolbox", shelf, srcItemType.ID)
+	create("Rake", garage, srcItemType.ID)
+	create("LooseItem", uuid.Nil, srcItemType.ID)
+
+	rows, err := tSvc.Entities.ExportCSV(ctx, src.ID, "https://homebox.example/")
+	require.NoError(t, err)
+
+	var csvBuf bytes.Buffer
+	writer := csv.NewWriter(&csvBuf)
+	require.NoError(t, writer.WriteAll(rows))
+
+	// The destination already has a Garage; the import must reuse it.
+	dst, err := tRepos.Groups.GroupCreate(ctx, "csv-loc-dst-"+fk.Str(4), uuid.Nil)
+	require.NoError(t, err)
+	dstLocType, err := tRepos.EntityTypes.GetDefault(ctx, dst.ID, true)
+	require.NoError(t, err)
+	dstGarage, err := tRepos.Entities.Create(ctx, dst.ID, repo.EntityCreate{Name: defaultLocationGarage, EntityTypeID: dstLocType.ID})
+	require.NoError(t, err)
+
+	imported, err := tSvc.Entities.CsvImport(ctx, dst.ID, bytes.NewReader(csvBuf.Bytes()))
+	require.NoError(t, err)
+	assert.Equal(t, len(rows)-1, imported)
+
+	type got struct {
+		isLocation bool
+		parent     string
+		parentID   uuid.UUID
+	}
+	all, err := tClient.Entity.Query().
+		Where(entity.HasGroupWith(group.ID(dst.ID))).
+		WithEntityType().WithParent().All(ctx)
+	require.NoError(t, err)
+	byName := map[string]got{}
+	for _, e := range all {
+		_, dup := byName[e.Name]
+		require.Falsef(t, dup, "entity %q imported more than once", e.Name)
+		g := got{isLocation: e.Edges.EntityType.IsLocation}
+		if e.Edges.Parent != nil {
+			g.parent, g.parentID = e.Edges.Parent.Name, e.Edges.Parent.ID
+		}
+		byName[e.Name] = g
+	}
+
+	// Names are unique (checked above), so parent names identify parents;
+	// Garage-children must hang off the pre-existing destination Garage.
+	assert.Equal(t, dstGarage.ID, byName["Shelf"].parentID)
+	assert.Equal(t, dstGarage.ID, byName["Rake"].parentID)
+	for name, g := range byName {
+		g.parentID = uuid.Nil
+		byName[name] = g
+	}
+	assert.Equal(t, map[string]got{
+		defaultLocationGarage: {isLocation: true},
+		"Shelf":               {isLocation: true, parent: defaultLocationGarage},
+		"Attic":               {isLocation: true},
+		"Toolbox":             {parent: "Shelf"},
+		"Rake":                {parent: defaultLocationGarage},
+		"LooseItem":           {},
+	}, byName)
+}
+
+func TestIsCSVLocationURL(t *testing.T) {
+	id := uuid.New().String()
+	for raw, want := range map[string]bool{
+		"https://homebox.example/location/" + id:       true,
+		"https://homebox.example/location/" + id + "/": true,
+		"http://10.0.0.5:7745/homebox/location/" + id:  true,
+		"/location/" + id:                                 true,
+		"https://homebox.example/item/" + id:              false,
+		"https://homebox.example/location/":               false,
+		"https://homebox.example/location/not-a-uuid":     false,
+		"https://homebox.example/location/" + id + "/foo": false,
+		"":         false,
+		"location": false,
+	} {
+		assert.Equalf(t, want, isCSVLocationURL(raw), "isCSVLocationURL(%q)", raw)
+	}
+}
+
 func TestCSVImportRejectsSelfParentRef(t *testing.T) {
 	ctx := context.Background()
 
